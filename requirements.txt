@@ -1,4 +1,3 @@
-flask
-opennsfw2
-Pillow
-opencv-python
+pyTelegramBotAPI
+aiohttp
+python-arq
