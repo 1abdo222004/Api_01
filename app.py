@@ -1,94 +1,80 @@
-from flask import Flask, request, jsonify
-import opennsfw2 as n2
-from PIL import Image
-import io
-import os
-import tempfile
-import cv2
-import numpy as np
 
-app = Flask(__name__)
+import telebot
+import threading
+import asyncio
+from aiohttp import ClientSession
+from Python_ARQ import ARQ
+import os,random
+keys=['YNGZSM-KGFVYX-DKAQID-XHJRYP-ARQ','HVNQZK-DONUYX-TFWNHP-UXPDVU-ARQ','SEKDTT-RJWLAY-ASOYBR-CUTLKY-ARQ','FHUWYE-TOKGGI-DYDSYS-DJOKIW-ARQ','RZOQET-QTRRZI-RQJMMS-JJLYPN-ARQ']
+TOKEN = "8102359893:AAEZUgzUtWN4xyjpApOjQ_ZA3Tv9NGssnF0"
+ARQ_API_KEY = "YNGZSM-KGFVYX-DKAQID-XHJRYP-ARQ"   # من https://t.me/ARQRoBot
+ARQ_API_URL = "https://arq.hamker.dev"
 
-# عتبة الكشف (0.0 - 1.0) - كلما ارتفع الرقم، أقل حساسية
-NSFW_THRESHOLD = 0.6
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
-@app.route('/')
-def home():
-    return """
-    <h1>NSFW Detection API (محلي - 2025)</h1>
-    <p>استخدم الـ endpoints:</p>
-    <ul>
-        <li>POST /detect/image - للصور</li>
-        <li>POST /detect/video - للفيديوهات</li>
-    </ul>
-    <p>أرسل الملف في حقل 'file'</p>
-    """
 
-@app.route('/detect/image', methods=['POST'])
-def detect_image():
-    if 'file' not in request.files:
-        return jsonify({"error": "لا يوجد ملف مرفوع"}), 400
+def run_async(func, *args):
+    asyncio.run(func(*args))
+
+
+@bot.message_handler(
+    content_types=["photo", "video", "sticker", "animation"],
+    chat_types=["group", "supergroup"]
+)
+def anti_nsfw(message):
+
+    file_id = None
+
+    if message.photo:
+        file_id = message.photo[-1].file_id
+
+    elif message.video and message.video.thumb:
+        file_id = message.video.thumb.file_id
+
+    elif message.sticker and message.sticker.thumb:
+        file_id = message.sticker.thumb.file_id
+
+    elif message.animation and message.animation.thumb:
+        file_id = message.animation.thumb.file_id
+
+    if file_id:
+        threading.Thread(
+            target=run_async,
+            args=(scan_nsfw, message, file_id)
+        ).start()
+
+
+async def scan_nsfw(message, file_id):
+    session = ClientSession()
     
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "اسم الملف فارغ"}), 400
-    
+    arq = ARQ(ARQ_API_URL, ARQ_API_KEY, session)
+
     try:
-        # قراءة الصورة
-        img_bytes = file.read()
-        pil_image = Image.open(io.BytesIO(img_bytes))
-        
-        # الكشف
-        probability = n2.predict_image(pil_image)
-        is_nsfw = probability > NSFW_THRESHOLD
-        
-        return jsonify({
-            "filename": file.filename,
-            "nsfw_probability": round(probability, 4),
-            "is_nsfw": is_nsfw,
-            "threshold": NSFW_THRESHOLD,
-            "message": "NSFW" if is_nsfw else "آمن (SFW)"
-        })
-    
-    except Exception as e:
-        return jsonify({"error": f"خطأ في معالجة الصورة: {str(e)}"}), 500
+        file_info = bot.get_file(file_id)
+        downloaded = bot.download_file(file_info.file_path)
 
-@app.route('/detect/video', methods=['POST'])
-def detect_video():
-    if 'file' not in request.files:
-        return jsonify({"error": "لا يوجد ملف مرفوع"}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "اسم الملف فارغ"}), 400
-    
-    try:
-        # حفظ الفيديو مؤقتًا
-        temp_fd, temp_path = tempfile.mkstemp(suffix=os.path.splitext(file.filename)[1])
-        file.save(temp_path)
-        
-        # الكشف في الفيديو (فحص إطارات منتظمة)
-        elapsed, probabilities = n2.predict_video_frames(temp_path, frame_interval=16)  # كل ~0.5 ثانية
-        avg_probability = float(np.mean(probabilities)) if probabilities else 0.0
-        is_nsfw = avg_probability > NSFW_THRESHOLD
-        
-        # حذف الملف المؤقت
-        os.close(temp_fd)
-        os.remove(temp_path)
-        
-        return jsonify({
-            "filename": file.filename,
-            "average_nsfw_probability": round(avg_probability, 4),
-            "frames_analyzed": len(probabilities),
-            "is_nsfw": is_nsfw,
-            "threshold": NSFW_THRESHOLD,
-            "message": "NSFW" if is_nsfw else "آمن (SFW)"
-        })
-    
-    except Exception as e:
-        return jsonify({"error": f"خطأ في معالجة الفيديو: {str(e)}"}), 500
+        file_path = f"temp_{message.message_id}.jpg"
+        with open(file_path, "wb") as f:
+            f.write(downloaded)
 
-if __name__ == '__main__':
-    print("🚀 NSFW Detection API يعمل الآن على http://127.0.0.1:5000")
-    print("استخدم /detect/image أو /detect/video")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+        resp = await arq.nsfw_scan(file=file_path)
+        print(resp)
+
+        if resp.result.is_nsfw:
+            bot.delete_message(message.chat.id, message.message_id)
+            bot.send_message(
+                message.chat.id,
+                f"• <a href='tg://user?id={message.from_user.id}'>User</a>\n"
+                f"• تم حذف الرسالة لأنها تحتوي على محتوى NSFW 🚫"
+            )
+
+        os.remove(file_path)
+
+    except Exception as e:
+        print("Error:", e)
+
+    await session.close()
+
+
+print("Bot Started ✅")
+bot.infinity_polling()
